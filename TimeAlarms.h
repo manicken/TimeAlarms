@@ -11,6 +11,8 @@
 #define dtNBR_ALARMS 6   // max is 255
 #elif defined(ESP8266)
 #define dtNBR_ALARMS 20  // for esp8266 chip - max is 255
+#elif defined(ESP32)
+#define dtNBR_ALARMS 20  // for esp8266 chip - max is 255
 #else
 #define dtNBR_ALARMS 12  // assume non-AVR has more memory
 #endif
@@ -56,7 +58,22 @@ typedef AlarmID_t AlarmId;  // Arduino friendly name
 #define dtINVALID_TIME     (time_t)(-1)
 #define AlarmHMS(_hr_, _min_, _sec_) (_hr_ * SECS_PER_HOUR + _min_ * SECS_PER_MIN + _sec_)
 
+
+// class defining the base class used for the OnTick callback function
+class OnTickExtParameters
+{
+public:
+    OnTickExtParameters(AlarmID_t id) :id(id) {}
+    OnTickExtParameters(AlarmID_t id, int type) : id(id), type(type) {}
+    virtual ~OnTickExtParameters() = default; // Virtual destructor
+    AlarmID_t id;
+    int type = 0; // base
+};
+
 typedef void (*OnTick_t)();  // alarm callback function typedef
+typedef void (*OnTickExt_t)(const OnTickExtParameters*);  // alarm callback function typedef
+#define IF_STATIC_CAST_DERIVED(TYPE, OUTPUT_NAME, ptr) if (const auto* OUTPUT_NAME = static_cast<const TYPE*>(ptr))
+
 
 // class defining an alarm instance, only used by dtAlarmsClass
 class AlarmClass
@@ -64,6 +81,8 @@ class AlarmClass
 public:
   AlarmClass();
   OnTick_t onTickHandler;
+  OnTickExt_t onTickExtHandler;
+  OnTickExtParameters *onTickParameters;
   void updateNextTrigger();
   time_t value;
   time_t nextTrigger;
@@ -74,15 +93,36 @@ public:
 class TimeAlarmsClass
 {
 private:
-  AlarmClass Alarm[dtNBR_ALARMS];
+  AlarmClass *Alarm;
+  int currentNrOfAlarms = 0;
   void serviceAlarms();
   uint8_t isServicing;
   uint8_t servicedAlarmId; // the alarm currently being serviced
   AlarmID_t create(time_t value, OnTick_t onTickHandler, uint8_t isOneShot, dtAlarmPeriod_t alarmType);
+  AlarmID_t create(time_t value, OnTickExt_t onTickExtHandler, OnTickExtParameters *onTickExtParameters, uint8_t isOneShot, dtAlarmPeriod_t alarmType);
 
 public:
-  TimeAlarmsClass();
-  // functions to create alarms and timers
+  
+  TimeAlarmsClass() : TimeAlarmsClass(dtNBR_ALARMS) {
+    isServicing = false;
+    for(uint8_t id = 0; id < currentNrOfAlarms; id++) {
+      clear(id);   // ensure all Alarms are cleared and available for allocation
+    }
+  }
+  TimeAlarmsClass(int nrOfAlarms) {
+    currentNrOfAlarms = nrOfAlarms;
+    Alarm = new AlarmClass[nrOfAlarms];
+  }
+  ~TimeAlarmsClass() {
+    delete[] Alarm;
+  }
+
+  int getCurrentNrOfAlarms() {
+    return currentNrOfAlarms;
+  }
+
+  // normal functions to create alarms and timers
+  // that use callback function with no parameters
 
   // trigger once at the given time in the future
   AlarmID_t triggerOnce(time_t value, OnTick_t onTickHandler) {
@@ -139,8 +179,70 @@ public:
   AlarmID_t timerRepeat(const int H,  const int M,  const int S, OnTick_t onTickHandler) {
     return timerRepeat(AlarmHMS(H,M,S), onTickHandler);
   }
+  
+  // functions to create alarms and timers
+  // that use callback function with parameters
+
+  // trigger once at the given time in the future
+  AlarmID_t triggerOnce(time_t value, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    if (value <= 0) return dtINVALID_ALARM_ID;
+    return create(value, onTickHandler, onTickExtParameters, true, dtExplicitAlarm);
+  }
+
+  // trigger once at given time of day
+  AlarmID_t alarmOnce(time_t value, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    if (value <= 0 || value > SECS_PER_DAY) return dtINVALID_ALARM_ID;
+    return create(value, onTickHandler, onTickExtParameters, true, dtDailyAlarm);
+  }
+  AlarmID_t alarmOnce(const int H, const int M, const int S, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    return alarmOnce(AlarmHMS(H,M,S), onTickHandler, onTickExtParameters);
+  }
+
+  // trigger once on a given day and time
+  AlarmID_t alarmOnce(const timeDayOfWeek_t DOW, const int H, const int M, const int S, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    time_t value = (DOW-1) * SECS_PER_DAY + AlarmHMS(H,M,S);
+    if (value <= 0) return dtINVALID_ALARM_ID;
+    return create(value, onTickHandler, onTickExtParameters, true, dtWeeklyAlarm);
+  }
+
+  // trigger daily at given time of day
+  AlarmID_t alarmRepeat(time_t value, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    if (value > SECS_PER_DAY) return dtINVALID_ALARM_ID;
+    return create(value, onTickHandler, onTickExtParameters, false, dtDailyAlarm);
+  }
+  AlarmID_t alarmRepeat(const int H, const int M, const int S, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    return alarmRepeat(AlarmHMS(H,M,S), onTickHandler, onTickExtParameters);
+  }
+
+  // trigger weekly at a specific day and time
+  AlarmID_t alarmRepeat(const timeDayOfWeek_t DOW, const int H, const int M, const int S, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    time_t value = (DOW-1) * SECS_PER_DAY + AlarmHMS(H,M,S);
+    if (value <= 0) return dtINVALID_ALARM_ID;
+    return create(value, onTickHandler, onTickExtParameters, false, dtWeeklyAlarm);
+  }
+
+  // trigger once after the given number of seconds
+  AlarmID_t timerOnce(time_t value, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    if (value <= 0) return dtINVALID_ALARM_ID;
+    return create(value, onTickHandler, onTickExtParameters, true, dtTimer);
+  }
+  AlarmID_t timerOnce(const int H, const int M, const int S, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    return timerOnce(AlarmHMS(H,M,S), onTickHandler, onTickExtParameters);
+  }
+
+  // trigger at a regular interval
+  AlarmID_t timerRepeat(time_t value, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    if (value <= 0) return dtINVALID_ALARM_ID;
+    return create(value, onTickHandler, onTickExtParameters, false, dtTimer);
+  }
+  AlarmID_t timerRepeat(const int H,  const int M,  const int S, OnTickExt_t onTickHandler, OnTickExtParameters *onTickExtParameters) {
+    return timerRepeat(AlarmHMS(H,M,S), onTickHandler, onTickExtParameters);
+  }
 
   void delay(unsigned long ms);
+  void delay() {
+    delay(0);
+  }
 
   // utility methods
   uint8_t getDigitsNow( dtUnits_t Units) const;         // returns the current digit value for the given time unit
@@ -156,7 +258,7 @@ public:
   time_t read(AlarmID_t ID) const;                // return the value for the given timer
   dtAlarmPeriod_t readType(AlarmID_t ID) const;   // return the alarm type for the given alarm ID
 
-  void free(AlarmID_t ID);                  // free the id to allow its reuse
+  void clear(AlarmID_t ID);                  // free and reset the id to allow its reuse,  (changed function name from free as free is a c function) 
 
 #ifndef USE_SPECIALIST_METHODS
 private:  // the following methods are for testing and are not documented as part of the standard library
@@ -168,7 +270,7 @@ private:  // the following methods are for testing and are not documented as par
   bool isAlarm(AlarmID_t ID) const;               // returns true if id is for a time based alarm, false if its a timer or not allocated
 };
 
-extern TimeAlarmsClass Alarm;  // make an instance for the user
+//extern TimeAlarmsClass Alarm;  // make an instance for the user
 
 /*==============================================================================
  * MACROS

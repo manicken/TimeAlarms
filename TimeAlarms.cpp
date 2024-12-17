@@ -24,6 +24,7 @@
 #define IS_REPEAT   false
 
 
+
 //**************************************************************
 //* Alarm Class Constructor
 
@@ -33,6 +34,7 @@ AlarmClass::AlarmClass()
   Mode.alarmType = dtNotAllocated;
   value = nextTrigger = 0;
   onTickHandler = NULL;  // prevent a callback until this pointer is explicitly set
+  onTickExtHandler = NULL; // or if this is explicitly set
 }
 
 //**************************************************************
@@ -81,27 +83,26 @@ void AlarmClass::updateNextTrigger()
 //**************************************************************
 //* Time Alarms Public Methods
 
-TimeAlarmsClass::TimeAlarmsClass()
-{
-  isServicing = false;
-  for(uint8_t id = 0; id < dtNBR_ALARMS; id++) {
-    free(id);   // ensure all Alarms are cleared and available for allocation
-  }
-}
-
 void TimeAlarmsClass::enable(AlarmID_t ID)
 {
-  if (isAllocated(ID)) {
-    if (( !(dtUseAbsoluteValue(Alarm[ID].Mode.alarmType) && (Alarm[ID].value == 0)) ) && (Alarm[ID].onTickHandler != NULL)) {
-      // only enable if value is non zero and a tick handler has been set
-      // (is not NULL, value is non zero ONLY for dtTimer & dtExplicitAlarm
-      // (the rest can have 0 to account for midnight))
-      Alarm[ID].Mode.isEnabled = true;
-      Alarm[ID].updateNextTrigger(); // trigger is updated whenever  this is called, even if already enabled
-    } else {
-      Alarm[ID].Mode.isEnabled = false;
-    }
+  if (isAllocated(ID) == false) return;
+  
+  if (dtUseAbsoluteValue(Alarm[ID].Mode.alarmType) && (Alarm[ID].value == 0))
+  {
+    Alarm[ID].Mode.isEnabled = false;
+    return;
   }
+  if (Alarm[ID].onTickHandler == NULL && Alarm[ID].onTickExtHandler == NULL)
+  {
+    Alarm[ID].Mode.isEnabled = false;
+    return;
+  }
+  // only enable if value is non zero and a tick handler has been set
+  // (is not NULL, value is non zero ONLY for dtTimer & dtExplicitAlarm
+  // (the rest can have 0 to account for midnight))
+  Alarm[ID].Mode.isEnabled = true;
+  Alarm[ID].updateNextTrigger(); // trigger is updated whenever  this is called, even if already enabled
+
 }
 
 void TimeAlarmsClass::disable(AlarmID_t ID)
@@ -141,12 +142,14 @@ dtAlarmPeriod_t TimeAlarmsClass::readType(AlarmID_t ID) const
   }
 }
 
-void TimeAlarmsClass::free(AlarmID_t ID)
+void TimeAlarmsClass::clear(AlarmID_t ID) // change function name from free as free is a c function 
 {
   if (isAllocated(ID)) {
     Alarm[ID].Mode.isEnabled = false;
     Alarm[ID].Mode.alarmType = dtNotAllocated;
     Alarm[ID].onTickHandler = NULL;
+    Alarm[ID].onTickExtHandler = NULL;
+    delete Alarm[ID].onTickParameters;
     Alarm[ID].value = 0;
     Alarm[ID].nextTrigger = 0;
   }
@@ -156,7 +159,7 @@ void TimeAlarmsClass::free(AlarmID_t ID)
 uint8_t TimeAlarmsClass::count() const
 {
   uint8_t c = 0;
-  for(uint8_t id = 0; id < dtNBR_ALARMS; id++) {
+  for(uint8_t id = 0; id < currentNrOfAlarms; id++) {
     if (isAllocated(id)) c++;
   }
   return c;
@@ -171,7 +174,7 @@ bool TimeAlarmsClass::isAlarm(AlarmID_t ID) const
 // returns true if this id is allocated
 bool TimeAlarmsClass::isAllocated(AlarmID_t ID) const
 {
-  return (ID < dtNBR_ALARMS && Alarm[ID].Mode.alarmType != dtNotAllocated);
+  return (ID < currentNrOfAlarms && Alarm[ID].Mode.alarmType != dtNotAllocated);
 }
 
 // returns the currently triggered alarm id
@@ -234,17 +237,25 @@ void TimeAlarmsClass::serviceAlarms()
 {
   if (!isServicing) {
     isServicing = true;
-    for (servicedAlarmId = 0; servicedAlarmId < dtNBR_ALARMS; servicedAlarmId++) {
+    for (servicedAlarmId = 0; servicedAlarmId < currentNrOfAlarms; servicedAlarmId++) {
       if (Alarm[servicedAlarmId].Mode.isEnabled && (now() >= Alarm[servicedAlarmId].nextTrigger)) {
         OnTick_t TickHandler = Alarm[servicedAlarmId].onTickHandler;
-        if (Alarm[servicedAlarmId].Mode.isOneShot) {
-          free(servicedAlarmId);  // free the ID if mode is OnShot
-        } else {
-          Alarm[servicedAlarmId].updateNextTrigger();
-        }
+        OnTickExt_t TickHandlerExt = Alarm[servicedAlarmId].onTickExtHandler;
+        
         if (TickHandler != NULL) {
           (*TickHandler)();     // call the handler
         }
+        else if (TickHandlerExt != NULL) {
+          OnTickExtParameters *TickHandlerExtParameters = Alarm[servicedAlarmId].onTickParameters;
+          (*TickHandlerExt)(TickHandlerExtParameters);
+        }
+
+        if (Alarm[servicedAlarmId].Mode.isOneShot) {
+          clear(servicedAlarmId);  // free the ID if mode is OnShot
+        } else {
+          Alarm[servicedAlarmId].updateNextTrigger();
+        }
+        
       }
     }
     isServicing = false;
@@ -256,7 +267,7 @@ time_t TimeAlarmsClass::getNextTrigger() const
 {
   time_t nextTrigger = 0;
 
-  for (uint8_t id = 0; id < dtNBR_ALARMS; id++) {
+  for (uint8_t id = 0; id < currentNrOfAlarms; id++) {
     if (isAllocated(id)) {
       if (nextTrigger == 0) {
         nextTrigger = Alarm[id].nextTrigger;
@@ -283,7 +294,7 @@ AlarmID_t TimeAlarmsClass::create(time_t value, OnTick_t onTickHandler, uint8_t 
 {
   if ( ! ( (dtIsAlarm(alarmType) && now() < SECS_PER_YEAR) || (dtUseAbsoluteValue(alarmType) && (value == 0)) ) ) {
     // only create alarm ids if the time is at least Jan 1 1971
-    for (uint8_t id = 0; id < dtNBR_ALARMS; id++) {
+    for (uint8_t id = 0; id < currentNrOfAlarms; id++) {
       if (Alarm[id].Mode.alarmType == dtNotAllocated) {
         // here if there is an Alarm id that is not allocated
         Alarm[id].onTickHandler = onTickHandler;
@@ -298,5 +309,32 @@ AlarmID_t TimeAlarmsClass::create(time_t value, OnTick_t onTickHandler, uint8_t 
   return dtINVALID_ALARM_ID; // no IDs available or time is invalid
 }
 
+AlarmID_t TimeAlarmsClass::create(time_t value, OnTickExt_t onTickExtHandler, OnTickExtParameters *onTickExtParameters, uint8_t isOneShot, dtAlarmPeriod_t alarmType)
+{
+  if ( ! ( (dtIsAlarm(alarmType) && now() < SECS_PER_YEAR) || (dtUseAbsoluteValue(alarmType) && (value == 0)) ) ) {
+    // only create alarm ids if the time is at least Jan 1 1971
+    for (uint8_t id = 0; id < currentNrOfAlarms; id++) {
+      if (Alarm[id].Mode.alarmType == dtNotAllocated) {
+        // here if there is an Alarm id that is not allocated
+        Alarm[id].onTickHandler = NULL;
+        Alarm[id].onTickExtHandler = onTickExtHandler;
+        // Allocate and initialize onTickParameters if not provided
+        if (onTickExtParameters == nullptr) {
+          Alarm[id].onTickParameters = new OnTickExtParameters(id);
+        } else {
+          Alarm[id].onTickParameters = onTickExtParameters;
+          Alarm[id].onTickParameters->id = id;
+        }
+        Alarm[id].Mode.isOneShot = isOneShot;
+        Alarm[id].Mode.alarmType = alarmType;
+        Alarm[id].value = value;
+        enable(id);
+        return id;  // alarm created ok
+      }
+    }
+  }
+  return dtINVALID_ALARM_ID; // no IDs available or time is invalid
+}
+
 // make one instance for the user to use
-TimeAlarmsClass Alarm = TimeAlarmsClass() ;
+//TimeAlarmsClass Alarm = TimeAlarmsClass();
