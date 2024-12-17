@@ -6,6 +6,8 @@
 #include <Arduino.h>
 #include "TimeLib.h"
 
+#define TIME_ALARMS_EXT
+
 #if !defined(dtNBR_ALARMS )
 #if defined(__AVR__)
 #define dtNBR_ALARMS 6   // max is 255
